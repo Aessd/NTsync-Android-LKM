@@ -1,0 +1,164 @@
+name: Build NTsync
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Release version, e.g. v0.1.0"
+        required: true
+        type: string
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.kmi }}
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+
+      matrix:
+        kmi:
+          - android13-5.10
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+
+    container:
+      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260828
+      options: --privileged
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Prepare kernel
+        run: |
+          set -e
+
+          KMI="${{ matrix.kmi }}"
+          SRC="/opt/ddk/src/${KMI}"
+          KDIR="/opt/ddk/kdir/${KMI}"
+
+          echo "KMI=$KMI"
+          echo "SRC=$SRC"
+          echo "KDIR=$KDIR"
+
+          test -d "$SRC"
+
+          mkdir -p "$KDIR"
+
+          cd "$SRC"
+
+          make O="$KDIR" gki_defconfig
+
+          scripts/config \
+            --file "$KDIR/.config" \
+            -d LTO_CLANG \
+            -e LTO_NONE \
+            -d LTO_CLANG_THIN \
+            -d LTO_CLANG_FULL \
+            -d THINLTO
+
+          if [ "$KMI" = "android16-6.12" ]; then
+            scripts/config \
+              --file "$KDIR/.config" \
+              -e CONFIG_CFI_ICALL_NORMALIZE_INTEGERS
+          fi
+
+          make O="$KDIR" modules_prepare
+
+          echo "=== Kernel prepared ==="
+
+      - name: Build NTsync
+        run: |
+          set -e
+
+          KMI="${{ matrix.kmi }}"
+          KDIR="/opt/ddk/kdir/${KMI}"
+          MDIR="$GITHUB_WORKSPACE"
+
+          echo "=== Building NTsync for $KMI ==="
+
+          test -f "$KDIR/.config"
+
+          make -C "$KDIR" \
+            M="$MDIR" \
+            src="$MDIR" \
+            modules \
+            ARCH=arm64 \
+            LLVM=1
+
+          test -f "$MDIR/drivers/misc/ntsync.ko"
+
+          echo "=== Build completed ==="
+          ls -lh "$MDIR/drivers/misc/ntsync.ko"
+
+      - name: Package module
+        run: |
+          set -e
+
+          KMI="${{ matrix.kmi }}"
+          OUT="$GITHUB_WORKSPACE/out"
+
+          mkdir -p "$OUT"
+
+          cp \
+            "$GITHUB_WORKSPACE/drivers/misc/ntsync.ko" \
+            "$OUT/ntsync-${KMI}.ko"
+
+          llvm-strip -d "$OUT/ntsync-${KMI}.ko"
+
+          echo "=== Package completed ==="
+          ls -lh "$OUT/ntsync-${KMI}.ko"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntsync-${{ matrix.kmi }}
+          path: out/ntsync-${{ matrix.kmi }}.ko
+
+  release:
+    name: Create Release
+
+    needs: build
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Show release files
+        run: |
+          set -e
+
+          echo "=== Release files ==="
+          ls -lh release
+
+          test "$(find release -name '*.ko' | wc -l)" -eq 5
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          set -e
+
+          gh release create \
+            "$RELEASE_VERSION" \
+            release/*.ko \
+            --title "NTsync $RELEASE_VERSION" \
+            --notes "NTsync kernel modules for Android GKI KMI versions." \
+            --prerelease
