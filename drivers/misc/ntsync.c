@@ -26,12 +26,69 @@
 #include <linux/path.h>
 #include <linux/xattr.h>
 #include <linux/version.h>
+#include <linux/kprobes.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 #include <linux/mnt_idmapping.h>
+#else
+#include <linux/user_namespace.h>
 #endif
 
 #define NTSYNC_NAME	"ntsync"
+
+typedef unsigned long (*kallsyms_lookup_name_t)(const char* name);
+typedef int  (*kern_path_t)(const char *, unsigned int, struct path *);
+typedef void (*path_put_t)(const struct path *);
+typedef int  (*sched_hrtimeout_t)(ktime_t *, u64, enum hrtimer_mode, clockid_t);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)
+typedef int (*vfs_setxattr_noperm_t)(
+    struct dentry *,
+    const char *,
+    const void *,
+    size_t,
+    int
+);
+
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
+typedef int (*vfs_setxattr_noperm_t)(
+    struct user_namespace *,
+    struct dentry *,
+    const char *,
+    const void *,
+    size_t,
+    int
+);
+
+#else
+typedef int (*vfs_setxattr_noperm_t)(
+    struct mnt_idmap *,
+    struct dentry *,
+    const char *,
+    const void *,
+    size_t,
+    int
+);
+
+#endif
+
+#define SYM_LIST(X)                       		  \
+    X(kern_path,         	   		  kern_path_t) \
+    X(path_put,         		      path_put_t)   \
+    X(schedule_hrtimeout_range_clock, sched_hrtimeout_t) \
+    X(__vfs_setxattr_noperm, 		  vfs_setxattr_noperm_t)
+
+#define DECLARE(name, type) static type name##_func;
+SYM_LIST(DECLARE)
+#undef DECLARE
+
+#define LOOKUP_SYM(name, type) do {                      \
+    name##_func = (type)kallsyms_lookup_name_func(#name); \
+	if (!name##_func) { 								   \
+        pr_err("ntsync: failed to resolve %s\n", #name);    \
+        return -ENOENT; 								     \
+    } 														  \
+} while (0);
 
 enum ntsync_type {
 	NTSYNC_TYPE_SEM,
@@ -145,6 +202,26 @@ struct ntsync_device {
 };
 
 static struct delayed_work ntsync_perm_work;
+
+static kallsyms_lookup_name_t kallsyms_lookup_name_func;
+
+static int __init resolve_symbols(void) {
+	struct kprobe kp = {
+		.symbol_name = "kallsyms_lookup_name"
+	};
+
+	if(register_kprobe(&kp) < 0) {
+		pr_info("ntsync: register_kprobe failed\n");
+		return -1;
+	}
+	kallsyms_lookup_name_func = (kallsyms_lookup_name_t)kp.addr;
+
+	unregister_kprobe(&kp);
+
+	SYM_LIST(LOOKUP_SYM)
+
+	return 0;
+}
 
 /*
  * Single objects are locked using obj->lock.
@@ -869,7 +946,7 @@ static int ntsync_schedule(const struct ntsync_q *q, const struct ntsync_wait_ar
 			ret = 0;
 			break;
 		}
-		ret = schedule_hrtimeout_range_clock(timeout_ptr, 0, HRTIMER_MODE_ABS, clock);
+		ret = schedule_hrtimeout_range_clock_func(timeout_ptr, 0, HRTIMER_MODE_ABS, clock);
 	} while (ret < 0);
 	__set_current_state(TASK_RUNNING);
 
@@ -1212,20 +1289,20 @@ static void ntsync_fix_perms_worker(struct work_struct *work)
 {
     struct path path;
     char *ctx = "u:object_r:gpu_device:s0";
-    if (!kern_path("/dev/ntsync", LOOKUP_FOLLOW, &path)) {
+    if (!kern_path_func("/dev/ntsync", LOOKUP_FOLLOW, &path)) {
         struct inode *inode = d_backing_inode(path.dentry);
         if (inode) {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,12,0)
-             __vfs_setxattr_noperm(path.dentry, "security.selinux", ctx, strlen(ctx) + 1, 0);
+             __vfs_setxattr_noperm_func(path.dentry, "security.selinux", ctx, strlen(ctx) + 1, 0);
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(6,3,0)
-            __vfs_setxattr_noperm(&init_user_ns, path.dentry, "security.selinux", ctx, strlen(ctx) + 1, 0);
+            __vfs_setxattr_noperm_func(&init_user_ns, path.dentry, "security.selinux", ctx, strlen(ctx) + 1, 0);
 #else
-            __vfs_setxattr_noperm(&nop_mnt_idmap, path.dentry, "security.selinux", ctx, strlen(ctx) + 1, 0);
+            __vfs_setxattr_noperm_func(&nop_mnt_idmap, path.dentry, "security.selinux", ctx, strlen(ctx) + 1, 0);
 #endif
             inode->i_mode = (inode->i_mode & ~S_IALLUGO) | 0666;
             pr_info("ntsync: Applied 0666 and gpu_device context\n");
         }
-        path_put(&path);
+        path_put_func(&path);
     }
 }
 
@@ -1246,8 +1323,10 @@ static struct miscdevice ntsync_misc = {
 
 static int __init ntsync_init(void)
 {
-    int ret;
-
+	int ret = resolve_symbols();
+	if (ret) {
+		return ret;
+	}
     ret = misc_register(&ntsync_misc);
     if (ret)
         return ret;
