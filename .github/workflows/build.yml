@@ -9,6 +9,15 @@ on:
         type: string
         default: "v0.1.0"
 
+      release_type:
+        description: "Release type"
+        required: true
+        type: choice
+        options:
+          - release
+          - prerelease
+        default: release
+
 permissions:
   contents: write
 
@@ -133,7 +142,7 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
-        
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -153,12 +162,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.release_version }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
           set -e
 
-          gh release create \
-            "$RELEASE_VERSION" \
-            release/*.ko \
-            --title "NTsync $RELEASE_VERSION" \
-            --notes "NTsync kernel modules for Android GKI KMI versions." \
-            --prerelease
+          if [ "$RELEASE_TYPE" = "prerelease" ]; then
+            gh release create "$RELEASE_VERSION" release/*.ko --title "NTsync $RELEASE_VERSION" --notes "NTsync kernel modules for Android GKI KMI versions." --prerelease
+          else
+            gh release create "$RELEASE_VERSION" release/*.ko --title "NTsync $RELEASE_VERSION" --notes "NTsync kernel modules for Android GKI KMI versions."
+          fi
