@@ -36,6 +36,32 @@
 
 #define NTSYNC_NAME	"ntsync"
 
+#ifdef CONFIG_LOCKDEP
+
+#define ntsync_lockdep_assert(cond) \
+	lockdep_assert(cond)
+
+#define ntsync_lockdep_assert_held(lock) \
+	lockdep_assert_held(lock)
+
+#define ntsync_assert_held(obj) \
+	ntsync_lockdep_assert((lockdep_is_held(&(obj)->lock) != LOCK_STATE_NOT_HELD) || \
+		       ((lockdep_is_held(&(obj)->dev->wait_all_lock) != LOCK_STATE_NOT_HELD) && \
+			(obj)->dev_locked))
+
+#else
+
+#define ntsync_lockdep_assert(cond) \
+	do { } while (0)
+
+#define ntsync_lockdep_assert_held(lock) \
+	do { } while (0)
+
+#define ntsync_assert_held(obj) \
+	do { } while (0)
+
+#endif
+
 typedef unsigned long (*kallsyms_lookup_name_t)(const char* name);
 typedef int  (*kern_path_t)(const char *, unsigned int, struct path *);
 typedef void (*path_put_t)(const struct path *);
@@ -238,8 +264,8 @@ static int __init resolve_symbols(void) {
 
 static void dev_lock_obj(struct ntsync_device *dev, struct ntsync_obj *obj)
 {
-	lockdep_assert_held(&dev->wait_all_lock);
-	lockdep_assert(obj->dev == dev);
+	ntsync_lockdep_assert_held(&dev->wait_all_lock);
+	ntsync_lockdep_assert(obj->dev == dev);
 	spin_lock(&obj->lock);
 	/*
 	 * By setting obj->dev_locked inside obj->lock, it is ensured that
@@ -251,8 +277,8 @@ static void dev_lock_obj(struct ntsync_device *dev, struct ntsync_obj *obj)
 
 static void dev_unlock_obj(struct ntsync_device *dev, struct ntsync_obj *obj)
 {
-	lockdep_assert_held(&dev->wait_all_lock);
-	lockdep_assert(obj->dev == dev);
+	ntsync_lockdep_assert_held(&dev->wait_all_lock);
+	ntsync_lockdep_assert(obj->dev == dev);
 	spin_lock(&obj->lock);
 	obj->dev_locked = 0;
 	spin_unlock(&obj->lock);
@@ -275,7 +301,7 @@ static void obj_lock(struct ntsync_obj *obj)
 		 * wait_all_lock section, since we now own this lock, it should
 		 * be clear.
 		 */
-		lockdep_assert(!obj->dev_locked);
+		ntsync_lockdep_assert(!obj->dev_locked);
 		spin_unlock(&obj->lock);
 		mutex_unlock(&dev->wait_all_lock);
 	}
@@ -311,11 +337,6 @@ static void ntsync_unlock_obj(struct ntsync_device *dev, struct ntsync_obj *obj,
 	}
 }
 
-#define ntsync_assert_held(obj) \
-	lockdep_assert((lockdep_is_held(&(obj)->lock) != LOCK_STATE_NOT_HELD) || \
-		       ((lockdep_is_held(&(obj)->dev->wait_all_lock) != LOCK_STATE_NOT_HELD) && \
-			(obj)->dev_locked))
-
 static bool is_signaled(struct ntsync_obj *obj, __u32 owner)
 {
 	ntsync_assert_held(obj);
@@ -348,9 +369,9 @@ static void try_wake_all(struct ntsync_device *dev, struct ntsync_q *q,
 	int signaled = -1;
 	__u32 i;
 
-	lockdep_assert_held(&dev->wait_all_lock);
+	ntsync_lockdep_assert_held(&dev->wait_all_lock);
 	if (locked_obj)
-		lockdep_assert(locked_obj->dev_locked);
+		ntsync_lockdep_assert(locked_obj->dev_locked);
 
 	for (i = 0; i < count; i++) {
 		if (q->entries[i].obj != locked_obj)
@@ -398,8 +419,8 @@ static void try_wake_all_obj(struct ntsync_device *dev, struct ntsync_obj *obj)
 {
 	struct ntsync_q_entry *entry;
 
-	lockdep_assert_held(&dev->wait_all_lock);
-	lockdep_assert(obj->dev_locked);
+	ntsync_lockdep_assert_held(&dev->wait_all_lock);
+	ntsync_lockdep_assert(obj->dev_locked);
 
 	list_for_each_entry(entry, &obj->all_waiters, node)
 		try_wake_all(dev, entry->q, obj);
@@ -410,7 +431,7 @@ static void try_wake_any_sem(struct ntsync_obj *sem)
 	struct ntsync_q_entry *entry;
 
 	ntsync_assert_held(sem);
-	lockdep_assert(sem->type == NTSYNC_TYPE_SEM);
+	ntsync_lockdep_assert(sem->type == NTSYNC_TYPE_SEM);
 
 	list_for_each_entry(entry, &sem->any_waiters, node) {
 		struct ntsync_q *q = entry->q;
@@ -431,7 +452,7 @@ static void try_wake_any_mutex(struct ntsync_obj *mutex)
 	struct ntsync_q_entry *entry;
 
 	ntsync_assert_held(mutex);
-	lockdep_assert(mutex->type == NTSYNC_TYPE_MUTEX);
+	ntsync_lockdep_assert(mutex->type == NTSYNC_TYPE_MUTEX);
 
 	list_for_each_entry(entry, &mutex->any_waiters, node) {
 		struct ntsync_q *q = entry->q;
@@ -458,7 +479,7 @@ static void try_wake_any_event(struct ntsync_obj *event)
 	struct ntsync_q_entry *entry;
 
 	ntsync_assert_held(event);
-	lockdep_assert(event->type == NTSYNC_TYPE_EVENT);
+	ntsync_lockdep_assert(event->type == NTSYNC_TYPE_EVENT);
 
 	list_for_each_entry(entry, &event->any_waiters, node) {
 		struct ntsync_q *q = entry->q;
